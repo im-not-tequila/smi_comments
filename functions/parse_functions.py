@@ -1,35 +1,239 @@
-import asyncio
+import os
+import sys
 import aiohttp
 import time
 import requests
 import bs4
 import selenium.common.exceptions
-import io
-from bs4 import BeautifulSoup
+import re
 import dateparser
+
+from .settings import Settings
+from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from pytz import utc
 from time import mktime
 from lxml import html
 from pymysql.converters import escape_string
 from .db import DataBase
+from contextlib import contextmanager
 
 from selenium import webdriver
 from selenium.webdriver.firefox.options import Options
 
 
-class CommentsParseFunctions:
-    def __init__(self, main_db_info, tmp_db_info):
-        self.TIMEOUT = 15
-        self.HEADERS = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.9; rv:45.0) Gecko/20100101 Firefox/45.0'
-        }
+@contextmanager
+def suppress_stdout():
+    with open(os.devnull, "w") as devnull:
+        old_stdout = sys.stdout
+        sys.stdout = devnull
+        try:
+            yield
+        finally:
+            sys.stdout = old_stdout
 
+
+def sprint(*a, **b):
+    if Settings.CONSOLE:
+        print(*a, **b)
+
+
+class FunctionsDataBase:
+    def __init__(self):
         self.main_db = DataBase()
-        self.tmp_db = DataBase()
+        self.main_db.DB_INFO = Settings.MAIN_DB_INFO
 
-        self.main_db.DB_INFO = main_db_info
-        self.tmp_db.DB_INFO = tmp_db_info
+        self.tmp_db = DataBase()
+        self.tmp_db.DB_INFO = Settings.TMP_DB_INFO
+
+
+class Instruction:
+    def __init__(self):
+        self.resource_id = None
+        self.template_link = None
+        self.page_load_type = None
+        self.encoding = None
+        self.general_block_xpath = None
+        self.blocks_xpath = None
+        self.author_xpath = None
+        self.content_xpath = None
+        self.date_xpath = None
+        self.date_format = None
+        self.is_custom_get_date = None
+
+
+class ParseCommentsInstructions(FunctionsDataBase):
+    def __init__(self):
+        super().__init__()
+
+        self.query = """
+                        SELECT * FROM comments_instructions
+                        WHERE page_load_type = 'facebook_plugin'
+                     """
+        #NOT page_load_type = 'facebook_plugin'
+    def get(self) -> list:
+        instructions_elements = self.tmp_db.query_get(self.query)
+        instructions: list = []
+
+        for el in instructions_elements:
+            instruction = Instruction()
+
+            instruction.resource_id = el['resource_id']
+            instruction.template_link = el['url']
+            instruction.page_load_type = el['page_load_type']
+            instruction.general_block_xpath = el['general_block_xpath']
+            instruction.blocks_xpath = el['blocks_xpath']
+            instruction.content_xpath = el['content_xpath']
+            instruction.date_xpath = el['date_xpath']
+            instruction.author_xpath = el['author_xpath']
+            instruction.encoding = el['encoding']
+            instruction.date_format = el['date_format']
+            instruction.is_custom_get_date = el['get_date_custom']
+
+            if instruction.page_load_type == 'facebook_plugin':
+                instruction.blocks_xpath = 'div:::class:::UFIImageBlockContent'
+                instruction.content_xpath = '1::del::div:::class:::_3-8m'
+                instruction.date_xpath = '2::del::data-utime=":::"'
+                instruction.author_xpath = '3::del:://span[1]/text()'
+
+            if instruction.encoding == '':
+                instruction.encoding = 'utf8'
+
+            instructions.append(instruction)
+
+        return instructions
+
+
+class NewsItem:
+    def __init__(self):
+        self.item_id = None
+        self.link = None
+        self.page_soup_obj = None
+
+    def __str__(self):
+        text = ''
+        text += f'[ID] {self.item_id}\n'
+        text += f'[LINK] {self.link}\n'
+
+        if self.page_soup_obj is not None:
+            text += f'[PAGE] {str(self.page_soup_obj)[:150]}...\n'
+        else:
+            text += f'[PAGE] {self.page_soup_obj}\n'
+
+        return text
+
+
+class Logger(FunctionsDataBase):
+    def __init__(self):
+        super().__init__()
+
+        self.name = 'comments_parser'
+        self.time_format = '%Y-%m-%d %H:%M:%S'
+
+    def main_create(self) -> dict:
+        log_info = {}
+        start_time = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
+
+        query = """
+                   INSERT INTO comments_main_logs (start_time,file) 
+                   VALUES (%s,%s)
+                """
+        params = (start_time, self.name)
+        log_id = self.tmp_db.query_send(query, params)
+
+        log_info['log_id'] = log_id
+        log_info['start_time'] = start_time
+
+        self.write('[INFO] the parser is running')
+
+        return log_info
+
+    def resource_create(self, main_log_id: int, resource_id: int) -> dict:
+        log_info = {}
+        start_time = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
+
+        query = """
+                   INSERT INTO comments_resource_logs (main_log_id, resource_id, start_time) 
+                   VALUES (%s, %s, %s)
+                """
+        params = (main_log_id, resource_id, start_time)
+        log_id = self.tmp_db.query_send(query, params)
+
+        log_info['log_id'] = log_id
+        log_info['start_time'] = start_time
+
+        return log_info
+
+    def write(self, string: str):
+        with open(self.name + '.log', 'a') as f:
+            current_time = datetime.today().strftime(self.time_format)
+            f.write(f'{current_time} | {string}\n')
+
+    def main_close(self, log_info: dict):
+        start_time = datetime.strptime(log_info['start_time'], '%Y-%m-%d %H:%M:%S')
+        finish_time = datetime.today()
+        finish_time_str = finish_time.strftime('%Y-%m-%d %H:%M:%S')
+        duration = finish_time.timestamp() - start_time.timestamp()
+
+        query = """
+                   UPDATE comments_main_logs SET
+                   finish_time = %s,
+                   duration = %s,
+                   resources_count = %s,
+                   comments_count = %s,
+                   bad_comments_count = %s,
+                   added_comments_count = %s,
+                   unknown_exceptions_count = %s
+                   WHERE log_id = %s
+                """
+
+        params = (
+            finish_time_str,
+            duration,
+            log_info['resources_count'],
+            log_info['comments_count'],
+            log_info['bad_comments_count'],
+            log_info['added_comments_count'],
+            log_info['unknown_exceptions_count'],
+            log_info['log_id']
+        )
+
+        self.tmp_db.query_send(query, params)
+        self.write('[INFO] the parser is completed')
+
+    def resource_close(self, log_info: dict):
+        start_time = datetime.strptime(log_info['start_time'], '%Y-%m-%d %H:%M:%S')
+        finish_time = datetime.today()
+        finish_time_str = finish_time.strftime('%Y-%m-%d %H:%M:%S')
+        duration = finish_time.timestamp() - start_time.timestamp()
+
+        query = """
+                   UPDATE comments_resource_logs SET 
+                   finish_time = %s, 
+                   duration = %s, 
+                   links_count = %s, 
+                   comments_count = %s, 
+                   bad_comments_count = %s, 
+                   added_comments_count = %s, 
+                   unknown_exceptions_count = %s 
+                   WHERE log_id = %s
+                """
+
+        params = (finish_time_str,
+                  duration,
+                  log_info['links_count'],
+                  log_info['comments_count'],
+                  log_info['bad_comments_count'],
+                  log_info['added_comments_count'],
+                  log_info['unknown_exceptions_count'],
+                  log_info['log_id'])
+
+        self.tmp_db.query_send(query, params)
+
+
+class CommentsParseFunctions(FunctionsDataBase):
+    def __init__(self):
+        super().__init__()
 
     def get_resources(self) -> tuple:
         query = 'select * from comment_settings'
@@ -53,7 +257,7 @@ class CommentsParseFunctions:
         else:
             return True
 
-    def get_resource_items(self, resource_id: int) -> tuple:
+    def get_resource_items(self, resource_id: int) -> list[NewsItem]:
         date_from = datetime.now() - timedelta(3)
         date_from = date_from.strftime("%Y-%m-%d")
 
@@ -62,8 +266,15 @@ class CommentsParseFunctions:
         params = (resource_id,)
 
         result = self.main_db.query_get(query, params)
+        news_items: list[NewsItem] = []
 
-        return result
+        for el in result:
+            item = NewsItem()
+            item.item_id = el['id']
+            item.link = el['link']
+            news_items.append(item)
+
+        return news_items
 
     def get_item_link(self, template_link: str, item_link: str) -> str:
         item_id = item_link.split('/')[-1]
@@ -72,9 +283,7 @@ class CommentsParseFunctions:
         return link
 
     def get_facebook_item_link(self, item_link: str) -> str:
-        print(item_link)
-        #exit(0)
-        page = requests.get(url=item_link, timeout=self.TIMEOUT)
+        page = requests.get(url=item_link, timeout=Settings.TIMEOUT)
         actual_url = page.url
 
         link = 'https://www.facebook.com/plugins/feedback.php?app_id=' \
@@ -84,35 +293,19 @@ class CommentsParseFunctions:
         return link
 
     async def get_web_page(self, link: str, encoding: str) -> str:
-        async with aiohttp.ClientSession(headers=self.HEADERS) as session:
+        async with aiohttp.ClientSession(headers=Settings.HEADERS) as session:
             try:
-                async with session.get(link, timeout=self.TIMEOUT) as resp:
+                async with session.get(link, timeout=Settings.TIMEOUT) as resp:
                     file = await resp.read()
                     if resp.status == 200:
                         return file.decode(encoding=encoding, errors='replace')
-            except aiohttp.client.ClientConnectorSSLError:
-                async with session.get(link, timeout=self.TIMEOUT, ssl=False) as resp:
+            except aiohttp.client.ClientConnectorCertificateError:
+                async with session.get(link, timeout=Settings.TIMEOUT, ssl=False) as resp:
                     file = await resp.read()
                     if resp.status == 200:
                         return file.decode(encoding=encoding, errors='replace')
-            except Exception as e:
-                print(f'[ERROR] {str(e)}; link: {link}')
-
                 return ''
         return ''
-
-        # try:
-        #     result = requests.get(url=link, timeout=self.TIMEOUT, headers=self.HEADERS)
-        # except requests.exceptions.SSLError:
-        #     result = requests.get(url=link, timeout=self.TIMEOUT, headers=self.HEADERS, verify=False)
-        # except Exception as e:
-        #     print('[ERROR] ' + str(e))
-        #     return ''
-        #
-        # if encoding != '':
-        #     result.encoding = encoding
-        #
-        # return result.text
 
     def get_web_page_117002(self, data: dict) -> str:
         item_id = data['link'].split('-')[-1]
@@ -122,45 +315,60 @@ class CommentsParseFunctions:
 
         try:
             result = requests.get(url='http://vesti.kz/news/get/comments/?id=' + item_id,
-                                  timeout=self.TIMEOUT,
-                                  headers=self.HEADERS,)
+                                  timeout=Settings.TIMEOUT,
+                                  headers=Settings.HEADERS,)
 
             return result.text
         except Exception as e:
-            print('[ERROR] ' + str(e))
+            sprint('[ERROR] ' + str(e))
             return ''
 
+    # async def get_web_page_by_selenium(self, url: str) -> str:
+    #     browser_params = {'moz:firefoxOptions': {
+    #         'args': ['']
+    #     }}
+    #
+    #     service = services.Geckodriver(binary="./selenium_driver/geckodriver", log_file=os.devnull)
+    #     browser = browsers.Firefox(**browser_params)
+    #
+    #     with suppress_stdout():
+    #         async with get_session(service, browser) as session:
+    #             await session.get(url)
+    #             await session.execute_script("window.scrollBy({top: document.body.scrollHeight, behavior: 'smooth'});")
+    #             time.sleep(self.TIMEOUT // 2)
+    #             page = await session.get_page_source()
+    #
+    #     return page
+
     def get_web_page_by_selenium(self, url: str) -> str:
+        sprint(f'[SELENIUM LOAD] {url}\n')
         options = Options()
         options.add_argument('-headless')
 
         driver = webdriver.Firefox(executable_path='./selenium_driver/geckodriver', options=options)
-        driver.set_page_load_timeout(self.TIMEOUT)
+        driver.set_page_load_timeout(Settings.TIMEOUT_SELENIUM)
 
         try:
             driver.get(url)
             try:
                 driver.execute_script("window.scrollBy({top: document.body.scrollHeight, behavior: 'smooth'});")
-                time.sleep(self.TIMEOUT // 2)
+                time.sleep(Settings.TIMEOUT_SELENIUM // 2)
             except selenium.common.exceptions.JavascriptException as e:
-                print('[JS ERROR] ' + str(e))
+                sprint('[JS ERROR] ' + str(e))
         except selenium.common.exceptions.TimeoutException:
             try:
                 driver.execute_script("window.scrollBy({top: document.body.scrollHeight, behavior: 'smooth'});")
                 time.sleep(5)
             except selenium.common.exceptions.JavascriptException as e:
-                print('[JS ERROR] ' + str(e))
+                sprint('[JS ERROR] ' + str(e))
             driver.execute_script("window.stop();")
         except Exception as e:
-            print('[ERROR] ' + str(e))
+            sprint('[ERROR] ' + str(e))
             driver.quit()
             return ''
 
         page = driver.page_source
         driver.quit()
-        # print(url)
-        # print(page)
-        # exit(0)
 
         return page
 
@@ -227,41 +435,30 @@ class CommentsParseFunctions:
 
         return False
 
-    def create_log(self, log_name: str) -> dict:
-        log_info = {}
-        start_time = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
-
-        query = f'INSERT INTO comments_logs (start_time,file) VALUES (%s,%s)'
-        params = (start_time, log_name)
-        log_id = self.tmp_db.query_send(query, params)
-
-        log_info['log_id'] = log_id
-        log_info['start_time'] = start_time
-
-        return log_info
-
-    def close_log(self, log_info: dict):
-        start_time = datetime.strptime(log_info['start_time'], '%Y-%m-%d %H:%M:%S')
-        finish_time = datetime.today()
-        finish_time_str = finish_time.strftime('%Y-%m-%d %H:%M:%S')
-        duration = finish_time.timestamp() - start_time.timestamp()
-
-        query = f'UPDATE comments_logs SET ' \
-                f'finish_time = %s, ' \
-                f'duration = %s, ' \
-                f'total_resources_count = %s, ' \
-                f'total_comments_count = %s, ' \
-                f'added_comments_count = %s, ' \
-                f'unknown_exceptions_count = %s ' \
-                f'WHERE log_id = %s'
-
-        params = (finish_time_str, duration, log_info['total_resources_count'], log_info['total_comments_count'],
-                  log_info['added_comments_count'], log_info['unknown_exceptions_count'], log_info['log_id'])
-
-        self.tmp_db.query_send(query, params)
-
     def escape_data(self, string: str) -> str:
-        return escape_string(string)
+        emoj = re.compile("["        
+                          u"\U0001F600-\U0001F64F"  # emoticons        
+                          u"\U0001F300-\U0001F5FF"  # symbols & pictographs        
+                          u"\U0001F680-\U0001F6FF"  # transport & map symbols        
+                          u"\U0001F1E0-\U0001F1FF"  # flags (iOS)        
+                          u"\U00002500-\U00002BEF"  # chinese char        
+                          u"\U00002702-\U000027B0"        
+                          u"\U00002702-\U000027B0"        
+                          u"\U000024C2-\U0001F251"        
+                          u"\U0001f926-\U0001f937"        
+                          u"\U00010000-\U0010ffff"        
+                          u"\u2640-\u2642"        
+                          u"\u2600-\u2B55"        
+                          u"\u200d"        
+                          u"\u23cf"        
+                          u"\u23e9"       
+                          u"\u231a"        
+                          u"\ufe0f"  # dingbats        
+                          u"\u3030"                      
+                          "]+", re.UNICODE)
+
+        s = re.sub(emoj, '', string)
+        return escape_string(s)
 
     def insert_comment(self, query: str, params: tuple = ()):
         self.tmp_db.query_send(query, params)
@@ -348,7 +545,6 @@ class CommentsParseFunctions:
             top_tag = xpath_info[0]
             bottom_tag = xpath_info[1]
             bsoup = str(bsoup)
-            # print(bsoup)
             top_tag_position = bsoup.find(top_tag)
 
             if top_tag_position != -1:
@@ -381,8 +577,6 @@ class CommentsParseFunctions:
 
         pubdate = element.text.strip()
         pubdate = self.date_replacer(pubdate)
-        # print(pubdate)
-        # exit(0)
 
         if date_format != '':
             pubdate = dateparser.parse(pubdate, settings={'DATE_ORDER': date_format})
