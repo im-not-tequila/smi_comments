@@ -1,39 +1,42 @@
 import asyncio
-import time
-import urllib3
 import bs4
-import threading
-import queue
+
+from urllib3 import disable_warnings
+from time import time
+from threading import Thread
+from queue import Queue
 
 from functions.settings import Settings
 from functions.parse_functions import sprint
-from functions.parse_functions import Instruction, ParseCommentsInstructions, NewsItem, Logger, CommentsParseFunctions
+from functions.parse_functions import Instruction, CommentsInstructions, NewsItem
+from functions.parse_functions import MainLogInfo, ResourceLogInfo, Logger
+from functions.parse_functions import CommentsParseFunctions
 
 
-urllib3.disable_warnings()
+disable_warnings()
+
+
+class MyQueue(Queue):
+    def __init__(self):
+        super(MyQueue, self).__init__()
+        self.completed_count = 0
+
+    def task_done(self):
+        self.completed_count += 1
+        super(MyQueue, self).task_done()
+
+    def get_task_count(self):
+        return self.completed_count
 
 
 class CommentsParser:
     def __init__(self):
         self.func = CommentsParseFunctions()
-
-        self.func.TIMEOUT = Settings.TIMEOUT
         self.is_can_work: bool = self.func.check_connections()
-        self.main_log_info: dict = Logger().main_create()
-        self.resource_log_info: dict = {}
 
-        self.total_resources_count = 0
-        self.total_comments_count = 0
-        self.total_bad_comments_count = 0
-        self.total_added_comments_count = 0
-        self.total_unknown_exceptions_count = 0
-
-        self.current_resource_id = 0
-        self.current_links_count = 0
-        self.current_comments_count = 0
-        self.current_bad_comments_count = 0
-        self.current_added_comments_count = 0
-        self.current_unknown_exceptions_count = 0
+        self.log = Logger()
+        self.main_log_info: MainLogInfo = self.log.main_create()
+        self.resource_log_info: ResourceLogInfo = ResourceLogInfo()
 
         self.msg = ''
 
@@ -43,18 +46,16 @@ class CommentsParser:
         }
 
     def run(self):
-        log = Logger()
-
         try:
-            instructions = ParseCommentsInstructions().get()
-            self.total_resources_count = len(instructions)
+            instructions = CommentsInstructions().get()
+            self.main_log_info.resources_count = len(instructions)
 
             for instruction in instructions:
-                self.resource_log_info = log.resource_create(self.main_log_info['log_id'], instruction.resource_id)
+                self.resource_log_info = self.log.resource_create(self.main_log_info.log_id, instruction.resource_id)
                 news_items = self.func.get_resource_items(instruction.resource_id)
 
-                self.current_resource_id = instruction.resource_id
-                self.current_links_count = len(news_items)
+                self.resource_log_info.resource_id = instruction.resource_id
+                self.resource_log_info.links_count = len(news_items)
 
                 if instruction.page_load_type == 'selenium' or instruction.page_load_type == 'facebook_plugin':
                     self.get_soup_obj_selenium(news_items, instruction)
@@ -63,24 +64,20 @@ class CommentsParser:
                 loop = asyncio.get_event_loop()
                 loop.run_until_complete(asyncio.wait(futures))
 
-                log.resource_close(self.get_resource_log_info())
-                self.current_comments_count = 0
-                self.current_bad_comments_count = 0
-                self.current_added_comments_count = 0
-                self.current_unknown_exceptions_count = 0
+                self.log.resource_close(self.resource_log_info)
 
-            log.main_close(self.get_main_log_info())
+            self.log.main_close(self.main_log_info)
 
         except Exception as e:
             sprint('[GLOBAL ERROR] ' + str(e))
-            self.total_unknown_exceptions_count += 1
-            log.write(f'[GLOBAL ERROR] [resource_id: {self.current_resource_id}] {str(e)}')
-            log.main_close(self.get_main_log_info())
-            log.resource_close(self.get_resource_log_info())
+            self.main_log_info.unknown_exceptions_count += 1
+            self.log.write(f'[GLOBAL ERROR] [resource_id: {self.resource_log_info.resource_id}] {str(e)}')
+            self.log.main_close(self.main_log_info)
+            self.log.resource_close(self.resource_log_info)
             exit(0)
 
     async def parse_item(self, instruction: Instruction, item: NewsItem):
-        msg = f'***********************************************************************\n\n'
+        msg = f'\n***********************************************************************\n\n'
         msg += f'[RESOURCE ID: {instruction.resource_id}] {item.link}\n'
 
         if item.page_soup_obj is None:
@@ -89,11 +86,8 @@ class CommentsParser:
         comment_blocks = self.func.get_comment_blocks(item.page_soup_obj, instruction.blocks_xpath)
         comments_count = len(comment_blocks)
 
-        if instruction.page_load_type == 'facebook_plugin' and comments_count != 0:
-            comments_count -= 1
-
-        self.total_comments_count += comments_count
-        self.current_comments_count += comments_count
+        self.main_log_info.comments_count += comments_count
+        self.resource_log_info.comments_count += comments_count
 
         msg += f'[COMMENTS COUNT] {str(comments_count)}\n\n'
 
@@ -108,11 +102,7 @@ class CommentsParser:
         if instruction.template_link != '':
             link = self.func.get_item_link(instruction.template_link, link)
 
-        if instruction.page_load_type == 'facebook_plugin':
-            link = self.func.get_facebook_item_link(link)
-            page = self.func.get_web_page_by_selenium(link)
-
-        elif instruction.page_load_type == 'custom':
+        if instruction.page_load_type == 'custom':
             data = {
                 'link': link,
                 'encoding': instruction.encoding
@@ -136,29 +126,33 @@ class CommentsParser:
 
     def get_soup_obj_selenium(self, news_items: list[NewsItem], instruction: Instruction):
         max_threads = Settings.SELENIUM_MAX_THREADS
+        tasks_count = len(news_items)
 
-        if len(news_items) < max_threads:
-            max_threads = len(news_items)
+        if tasks_count < max_threads:
+            max_threads = tasks_count
 
-        threads: list[threading.Thread] = []
-        items_q = queue.Queue()
+        threads: list[Thread] = []
+        items_q = MyQueue()
 
         for item in news_items:
             items_q.put(item)
+
+        sprint(f'\r[SELENIUM] Uploaded successfully: 0/{tasks_count}', end='')
 
         for i in range(max_threads):
             args: tuple = (
                 instruction,
                 items_q,
+                tasks_count
             )
-            thread = threading.Thread(target=self.get_soup_obj_selenium_thread, args=args)
+            thread = Thread(target=self.get_soup_obj_selenium_thread, args=args)
             thread.start()
             threads.append(thread)
 
         for thread in threads:
             thread.join()
 
-    def get_soup_obj_selenium_thread(self, instruction: Instruction, items_q: queue.Queue):
+    def get_soup_obj_selenium_thread(self, instruction: Instruction, items_q: MyQueue, tasks_count: int):
         while not items_q.empty():
             item = items_q.get()
             link = item.link
@@ -179,6 +173,7 @@ class CommentsParser:
 
             item.page_soup_obj = general_soup_object
             items_q.task_done()
+            sprint(f'\r[SELENIUM] Uploaded successfully: {items_q.get_task_count()}/{tasks_count}', end='')
 
     async def parse_comment_block(self, comment_block: bs4.element, instruction: Instruction) -> dict:
         comment_data = {
@@ -213,8 +208,8 @@ class CommentsParser:
 
         if author == '' or content == '' or date['nd_date'] == 0:
             msg += f'\n!!! [BAD COMMENT]\n'
-            self.total_bad_comments_count += 1
-            self.current_bad_comments_count += 1
+            self.main_log_info.bad_comments_count += 1
+            self.resource_log_info.bad_comments_count += 1
 
             return msg
 
@@ -223,45 +218,21 @@ class CommentsParser:
         is_comment_in_db = self.func.check_comment(item_id, title, content)
 
         msg += f"[AUTHOR] {author}\n[DATE] {date['human_date']}\n[CONTENT] {content}\n"
-        query = """INSERT IGNORE INTO comments_items (item_id, author, content, nd_date, s_date, not_date) 
-                   VALUES (%s, %s, %s, %s, UNIX_TIMESTAMP(), %s)"""
+
+        query = """
+                   INSERT IGNORE INTO comments_items (item_id, author, content, nd_date, s_date, not_date) 
+                   VALUES (%s, %s, %s, %s, UNIX_TIMESTAMP(), %s)
+                """
 
         params = (item_id, title, content, date['nd_date'], date['not_date'])
 
         if not is_comment_in_db:
             self.func.insert_comment(query, params)
-            self.total_added_comments_count += 1
-            self.current_added_comments_count += 1
+            self.main_log_info.added_comments_count += 1
+            self.resource_log_info.added_comments_count += 1
             msg += '[ADDED]\n'
 
         return msg
-
-    def get_main_log_info(self):
-        log_info = {
-            'log_id': self.main_log_info['log_id'],
-            'start_time': self.main_log_info['start_time'],
-            'resources_count': self.total_resources_count,
-            'comments_count': self.total_comments_count,
-            'bad_comments_count': self.total_bad_comments_count,
-            'added_comments_count': self.total_added_comments_count,
-            'unknown_exceptions_count': self.total_unknown_exceptions_count
-        }
-
-        return log_info
-
-    def get_resource_log_info(self):
-        log_info = {
-            'log_id': self.resource_log_info['log_id'],
-            'resource_id': self.current_resource_id,
-            'start_time': self.resource_log_info['start_time'],
-            'links_count': self.current_links_count,
-            'comments_count': self.current_comments_count,
-            'bad_comments_count': self.current_bad_comments_count,
-            'added_comments_count': self.current_added_comments_count,
-            'unknown_exceptions_count': self.current_unknown_exceptions_count
-        }
-
-        return log_info
 
 
 if __name__ == "__main__":
@@ -270,8 +241,8 @@ if __name__ == "__main__":
     if not comments_parser.is_can_work:
         exit(0)
 
-    time_start = time.time()
+    time_start = time()
     comments_parser.run()
-    time_finish = time.time()
+    time_finish = time()
     sprint()
     sprint(f'Total working time: {time_finish - time_start}')

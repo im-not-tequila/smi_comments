@@ -1,11 +1,17 @@
-from .parse_functions import sprint, Instruction, ParseCommentsInstructions, NewsItem, Logger, CommentsParseFunctions
-
+from functions.settings import Settings
+from functions.parse_functions import sprint
+from functions.parse_functions import Instruction, CommentsInstructions, NewsItem
+from functions.parse_functions import MainLogInfo, ResourceLogInfo, Logger
+from functions.parse_functions import CommentsParseFunctions
 
 __all__ = [
+    "Settings",
     "sprint",
     "Instruction",
-    "ParseCommentsInstructions",
+    "CommentsInstructions",
     "NewsItem",
+    "MainLogInfo",
+    "ResourceLogInfo",
     "Logger",
     "CommentsParseFunctions",
 ]

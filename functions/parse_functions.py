@@ -62,15 +62,15 @@ class Instruction:
         self.is_custom_get_date = None
 
 
-class ParseCommentsInstructions(FunctionsDataBase):
+class CommentsInstructions(FunctionsDataBase):
     def __init__(self):
         super().__init__()
 
         self.query = """
                         SELECT * FROM comments_instructions
-                        WHERE page_load_type = 'facebook_plugin'
+                        WHERE id = 35
                      """
-        #NOT page_load_type = 'facebook_plugin'
+
     def get(self) -> list:
         instructions_elements = self.tmp_db.query_get(self.query)
         instructions: list = []
@@ -91,7 +91,7 @@ class ParseCommentsInstructions(FunctionsDataBase):
             instruction.is_custom_get_date = el['get_date_custom']
 
             if instruction.page_load_type == 'facebook_plugin':
-                instruction.blocks_xpath = 'div:::class:::UFIImageBlockContent'
+                instruction.blocks_xpath = 'div:::direction:::right'
                 instruction.content_xpath = '1::del::div:::class:::_3-8m'
                 instruction.date_xpath = '2::del::data-utime=":::"'
                 instruction.author_xpath = '3::del:://span[1]/text()'
@@ -123,6 +123,35 @@ class NewsItem:
         return text
 
 
+class MainLogInfo:
+    def __init__(self):
+        self.log_id = None
+        self.start_time = None
+        self.finish_time = None
+        self.duration = None
+        self.file = None
+        self.resources_count = 0
+        self.comments_count = 0
+        self.bad_comments_count = 0
+        self.added_comments_count = 0
+        self.unknown_exceptions_count = 0
+
+
+class ResourceLogInfo:
+    def __init__(self):
+        self.log_id = None
+        self.main_log_id = None
+        self.resource_id = None
+        self.start_time = None
+        self.finish_time = None
+        self.duration = 0
+        self.links_count = 0
+        self.comments_count = 0
+        self.bad_comments_count = 0
+        self.added_comments_count = 0
+        self.unknown_exceptions_count = 0
+
+
 class Logger(FunctionsDataBase):
     def __init__(self):
         super().__init__()
@@ -130,8 +159,8 @@ class Logger(FunctionsDataBase):
         self.name = 'comments_parser'
         self.time_format = '%Y-%m-%d %H:%M:%S'
 
-    def main_create(self) -> dict:
-        log_info = {}
+    def main_create(self) -> MainLogInfo:
+        main_log_info = MainLogInfo()
         start_time = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
 
         query = """
@@ -141,15 +170,15 @@ class Logger(FunctionsDataBase):
         params = (start_time, self.name)
         log_id = self.tmp_db.query_send(query, params)
 
-        log_info['log_id'] = log_id
-        log_info['start_time'] = start_time
+        main_log_info.log_id = log_id
+        main_log_info.start_time = start_time
 
         self.write('[INFO] the parser is running')
 
-        return log_info
+        return main_log_info
 
-    def resource_create(self, main_log_id: int, resource_id: int) -> dict:
-        log_info = {}
+    def resource_create(self, main_log_id: int, resource_id: int) -> ResourceLogInfo:
+        resource_log_info = ResourceLogInfo()
         start_time = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
 
         query = """
@@ -159,18 +188,18 @@ class Logger(FunctionsDataBase):
         params = (main_log_id, resource_id, start_time)
         log_id = self.tmp_db.query_send(query, params)
 
-        log_info['log_id'] = log_id
-        log_info['start_time'] = start_time
+        resource_log_info.log_id = log_id
+        resource_log_info.start_time = start_time
 
-        return log_info
+        return resource_log_info
 
     def write(self, string: str):
         with open(self.name + '.log', 'a') as f:
             current_time = datetime.today().strftime(self.time_format)
             f.write(f'{current_time} | {string}\n')
 
-    def main_close(self, log_info: dict):
-        start_time = datetime.strptime(log_info['start_time'], '%Y-%m-%d %H:%M:%S')
+    def main_close(self, main_log_info: MainLogInfo):
+        start_time = datetime.strptime(main_log_info.start_time, '%Y-%m-%d %H:%M:%S')
         finish_time = datetime.today()
         finish_time_str = finish_time.strftime('%Y-%m-%d %H:%M:%S')
         duration = finish_time.timestamp() - start_time.timestamp()
@@ -190,19 +219,19 @@ class Logger(FunctionsDataBase):
         params = (
             finish_time_str,
             duration,
-            log_info['resources_count'],
-            log_info['comments_count'],
-            log_info['bad_comments_count'],
-            log_info['added_comments_count'],
-            log_info['unknown_exceptions_count'],
-            log_info['log_id']
+            main_log_info.resources_count,
+            main_log_info.comments_count,
+            main_log_info.bad_comments_count,
+            main_log_info.added_comments_count,
+            main_log_info.unknown_exceptions_count,
+            main_log_info.log_id
         )
 
         self.tmp_db.query_send(query, params)
         self.write('[INFO] the parser is completed')
 
-    def resource_close(self, log_info: dict):
-        start_time = datetime.strptime(log_info['start_time'], '%Y-%m-%d %H:%M:%S')
+    def resource_close(self, resource_log_info: ResourceLogInfo):
+        start_time = datetime.strptime(resource_log_info.start_time, '%Y-%m-%d %H:%M:%S')
         finish_time = datetime.today()
         finish_time_str = finish_time.strftime('%Y-%m-%d %H:%M:%S')
         duration = finish_time.timestamp() - start_time.timestamp()
@@ -221,12 +250,12 @@ class Logger(FunctionsDataBase):
 
         params = (finish_time_str,
                   duration,
-                  log_info['links_count'],
-                  log_info['comments_count'],
-                  log_info['bad_comments_count'],
-                  log_info['added_comments_count'],
-                  log_info['unknown_exceptions_count'],
-                  log_info['log_id'])
+                  resource_log_info.links_count,
+                  resource_log_info.comments_count,
+                  resource_log_info.bad_comments_count,
+                  resource_log_info.added_comments_count,
+                  resource_log_info.unknown_exceptions_count,
+                  resource_log_info.log_id)
 
         self.tmp_db.query_send(query, params)
 
@@ -234,13 +263,6 @@ class Logger(FunctionsDataBase):
 class CommentsParseFunctions(FunctionsDataBase):
     def __init__(self):
         super().__init__()
-
-    def get_resources(self) -> tuple:
-        query = 'select * from comment_settings'
-        # query = 'select * from comment_settings where id = 10'
-        result = self.tmp_db.query_get(query)
-
-        return result
 
     def check_connections(self) -> bool:
         query = "SHOW PROCESSLIST"
@@ -276,13 +298,15 @@ class CommentsParseFunctions(FunctionsDataBase):
 
         return news_items
 
-    def get_item_link(self, template_link: str, item_link: str) -> str:
+    @staticmethod
+    def get_item_link(template_link: str, item_link: str) -> str:
         item_id = item_link.split('/')[-1]
         link = template_link + item_id
 
         return link
 
-    def get_facebook_item_link(self, item_link: str) -> str:
+    @staticmethod
+    def get_facebook_item_link(item_link: str) -> str:
         page = requests.get(url=item_link, timeout=Settings.TIMEOUT)
         actual_url = page.url
 
@@ -292,13 +316,15 @@ class CommentsParseFunctions(FunctionsDataBase):
 
         return link
 
-    async def get_web_page(self, link: str, encoding: str) -> str:
+    @staticmethod
+    async def get_web_page(link: str, encoding: str) -> str:
         async with aiohttp.ClientSession(headers=Settings.HEADERS) as session:
             try:
                 async with session.get(link, timeout=Settings.TIMEOUT) as resp:
                     file = await resp.read()
                     if resp.status == 200:
                         return file.decode(encoding=encoding, errors='replace')
+
             except aiohttp.client.ClientConnectorCertificateError:
                 async with session.get(link, timeout=Settings.TIMEOUT, ssl=False) as resp:
                     file = await resp.read()
@@ -307,52 +333,19 @@ class CommentsParseFunctions(FunctionsDataBase):
                 return ''
         return ''
 
-    def get_web_page_117002(self, data: dict) -> str:
-        item_id = data['link'].split('-')[-1]
-
-        if item_id[-1] == '/':
-            item_id = item_id[:-1]
-
-        try:
-            result = requests.get(url='http://vesti.kz/news/get/comments/?id=' + item_id,
-                                  timeout=Settings.TIMEOUT,
-                                  headers=Settings.HEADERS,)
-
-            return result.text
-        except Exception as e:
-            sprint('[ERROR] ' + str(e))
-            return ''
-
-    # async def get_web_page_by_selenium(self, url: str) -> str:
-    #     browser_params = {'moz:firefoxOptions': {
-    #         'args': ['']
-    #     }}
-    #
-    #     service = services.Geckodriver(binary="./selenium_driver/geckodriver", log_file=os.devnull)
-    #     browser = browsers.Firefox(**browser_params)
-    #
-    #     with suppress_stdout():
-    #         async with get_session(service, browser) as session:
-    #             await session.get(url)
-    #             await session.execute_script("window.scrollBy({top: document.body.scrollHeight, behavior: 'smooth'});")
-    #             time.sleep(self.TIMEOUT // 2)
-    #             page = await session.get_page_source()
-    #
-    #     return page
-
-    def get_web_page_by_selenium(self, url: str) -> str:
-        sprint(f'[SELENIUM LOAD] {url}\n')
+    @staticmethod
+    def get_web_page_by_selenium(url: str) -> str:
         options = Options()
         options.add_argument('-headless')
 
-        driver = webdriver.Firefox(executable_path='./selenium_driver/geckodriver', options=options)
+        driver = webdriver.Firefox(executable_path=Settings.GECKODRIVER_PATH, options=options)
         driver.set_page_load_timeout(Settings.TIMEOUT_SELENIUM)
 
         try:
             driver.get(url)
             try:
                 driver.execute_script("window.scrollBy({top: document.body.scrollHeight, behavior: 'smooth'});")
-                time.sleep(Settings.TIMEOUT_SELENIUM // 2)
+                time.sleep(5)
             except selenium.common.exceptions.JavascriptException as e:
                 sprint('[JS ERROR] ' + str(e))
         except selenium.common.exceptions.TimeoutException:
@@ -372,10 +365,12 @@ class CommentsParseFunctions(FunctionsDataBase):
 
         return page
 
-    def get_item_soup(self, item_page: str) -> BeautifulSoup:
+    @staticmethod
+    def get_item_soup(item_page: str) -> BeautifulSoup:
         return BeautifulSoup(item_page, "html.parser")
 
-    def get_general_comment_block(self, soup_object: bs4.element, general_block_xpath: str) -> bs4.element:
+    @staticmethod
+    def get_general_comment_block(soup_object: bs4.element, general_block_xpath: str) -> bs4.element:
         general_block_xpath = general_block_xpath.split(':::')
         tag = general_block_xpath[0]
         attribute = general_block_xpath[1]
@@ -388,7 +383,8 @@ class CommentsParseFunctions(FunctionsDataBase):
 
         return element
 
-    def get_comment_blocks(self, soup_object: bs4.element, blocks_xpath: str) -> bs4.element:
+    @staticmethod
+    def get_comment_blocks(soup_object: bs4.element, blocks_xpath: str) -> bs4.element:
         blocks_xpath_split = blocks_xpath.split(':::')
         tag = blocks_xpath_split[0]
         attribute = blocks_xpath_split[1]
@@ -412,7 +408,8 @@ class CommentsParseFunctions(FunctionsDataBase):
 
         return elements
 
-    def get_comment_fb_author(self, bsoup: bs4.element) -> str:
+    @staticmethod
+    def get_comment_fb_author(bsoup: bs4.element) -> str:
         element = bsoup.find('a', {'class': 'UFICommentActorName'})
 
         if element is not None:
@@ -435,7 +432,8 @@ class CommentsParseFunctions(FunctionsDataBase):
 
         return False
 
-    def escape_data(self, string: str) -> str:
+    @staticmethod
+    def escape_data(string: str) -> str:
         emoj = re.compile("["        
                           u"\U0001F600-\U0001F64F"  # emoticons        
                           u"\U0001F300-\U0001F5FF"  # symbols & pictographs        
@@ -463,7 +461,8 @@ class CommentsParseFunctions(FunctionsDataBase):
     def insert_comment(self, query: str, params: tuple = ()):
         self.tmp_db.query_send(query, params)
 
-    def get_comment_data(self, bsoup: bs4.element, content_xpath: str) -> str:
+    @staticmethod
+    def get_comment_data(bsoup: bs4.element, content_xpath: str) -> str:
         parse_method = content_xpath.split('::del::')[0]
         xpath_info = content_xpath.split('::del::')[1]
 
@@ -619,41 +618,8 @@ class CommentsParseFunctions(FunctionsDataBase):
 
         return date_info
 
-    def get_comment_date_124444(self, bsoup: bs4.element.Tag, date_format):
-        date_info = {}
-        try:
-            date_in_span = bsoup.find_all('span')[2]
-            a_in_span = date_in_span.find('a')
-            span_in_span = date_in_span.find('span')
-            a_in_span.decompose()
-            span_in_span.decompose()
-            pubdate_str = date_in_span.text.strip()[:-1].strip()
-        except IndexError:
-            date_info['not_date'] = ''
-            date_info['nd_date'] = 0
-            date_info['human_date'] = ''
-
-            return date_info
-
-        year = datetime.now().year
-        month = pubdate_str.split('-')[0].split('/')[1].strip()
-        day = pubdate_str.split('-')[0].split('/')[0].strip()
-        hours = pubdate_str.split('-')[1].split(':')[0].strip()
-        minutes = pubdate_str.split('-')[1].split(':')[1].strip()
-
-        pubdate = datetime(int(year), int(month), int(day), int(hours), int(minutes))
-
-        not_date = f'{year}-{month}-{day}'
-        nd_date = int(mktime(utc.localize(pubdate).utctimetuple()))
-        human_date = f'{year}-{month}-{day} {hours}:{minutes}:00'
-
-        date_info['not_date'] = not_date
-        date_info['nd_date'] = nd_date
-        date_info['human_date'] = human_date
-
-        return date_info
-
-    def date_replacer(self, date_str: str) -> str:
+    @staticmethod
+    def date_replacer(date_str: str) -> str:
         replace_word_1 = {'понедельник': 'monday',
                           'вторник': 'tuesday',
                           'среда': 'wednesday',
@@ -698,3 +664,57 @@ class CommentsParseFunctions(FunctionsDataBase):
             date_str = date_str.replace(key, value)
 
         return date_str
+
+    # CUSTOM FUNCTIONS
+
+    @staticmethod
+    def get_web_page_117002(data: dict) -> str:
+        item_id = data['link'].split('-')[-1]
+
+        if item_id[-1] == '/':
+            item_id = item_id[:-1]
+
+        try:
+            result = requests.get(url='http://vesti.kz/news/get/comments/?id=' + item_id,
+                                  timeout=Settings.TIMEOUT,
+                                  headers=Settings.HEADERS,)
+
+            return result.text
+        except Exception as e:
+            sprint('[ERROR] ' + str(e))
+            return ''
+
+    @staticmethod
+    def get_comment_date_124444(bsoup: bs4.element.Tag, date_format):
+        date_info = {}
+        try:
+            date_in_span = bsoup.find_all('span')[2]
+            a_in_span = date_in_span.find('a')
+            span_in_span = date_in_span.find('span')
+            a_in_span.decompose()
+            span_in_span.decompose()
+            pubdate_str = date_in_span.text.strip()[:-1].strip()
+        except IndexError:
+            date_info['not_date'] = ''
+            date_info['nd_date'] = 0
+            date_info['human_date'] = ''
+
+            return date_info
+
+        year = datetime.now().year
+        month = pubdate_str.split('-')[0].split('/')[1].strip()
+        day = pubdate_str.split('-')[0].split('/')[0].strip()
+        hours = pubdate_str.split('-')[1].split(':')[0].strip()
+        minutes = pubdate_str.split('-')[1].split(':')[1].strip()
+
+        pubdate = datetime(int(year), int(month), int(day), int(hours), int(minutes))
+
+        not_date = f'{year}-{month}-{day}'
+        nd_date = int(mktime(utc.localize(pubdate).utctimetuple()))
+        human_date = f'{year}-{month}-{day} {hours}:{minutes}:00'
+
+        date_info['not_date'] = not_date
+        date_info['nd_date'] = nd_date
+        date_info['human_date'] = human_date
+
+        return date_info
