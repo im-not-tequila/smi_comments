@@ -23,3 +23,46 @@ class Settings:
 
     MAIN_DB_INFO = json.loads(config['CONNECTIONS_INFO']['MAIN_DB'])
     TMP_DB_INFO = json.loads(config['CONNECTIONS_INFO']['TMP_DB'])
+
+    QUERY_FOR_GET_INSTRUCTIONS = """
+                                    SELECT * FROM comments_instructions
+                                    WHERE id = 7
+                                 """
+
+    REPLACE_WORDS_FOR_DATE = {'понедельник': 'monday',
+                              'вторник': 'tuesday',
+                              'среда': 'wednesday',
+                              'четверг': 'thursday',
+                              'пятница': 'friday',
+                              'суббота': 'saturday',
+                              'воскресенье': 'sunday',
+
+                              'января': 'january',
+                              'февраля': 'february',
+                              'марта': 'march',
+                              'апреля': 'april',
+                              'мая': 'may',
+                              'июня': 'june',
+                              'июля': 'july',
+                              'августа': 'august',
+                              'сентября': 'september',
+                              'октября': 'october',
+                              'ноября': 'november',
+                              'декабря': 'december',
+
+                              'қаңтар': 'jan',
+                              'ақпан': 'feb',
+                              'наурыз': 'mar',
+                              'сәуір': 'apr',
+                              'мамыр': 'may',
+                              'маусым': 'jun',
+                              'шілде': 'jul',
+                              'тамыз': 'aug',
+                              'қыркүйек': 'sept',
+                              'қазан': 'oct',
+                              'қараша': 'nov',
+                              'желтоқсан': 'dec',
+
+                              'ж.': 'year',
+                              'г.': 'year'
+                              }

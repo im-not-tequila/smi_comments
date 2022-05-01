@@ -1,36 +1,20 @@
-import os
-import sys
-import aiohttp
-import time
-import requests
-import bs4
-import selenium.common.exceptions
-import re
 import dateparser
+import requests
+import aiohttp
+import bs4
+import re
 
+from pymysql.converters import escape_string
+from datetime import datetime, timedelta
 from .settings import Settings
 from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
-from pytz import utc
-from time import mktime
-from lxml import html
-from pymysql.converters import escape_string
 from .db import DataBase
-from contextlib import contextmanager
+from time import mktime, sleep
+from pytz import utc
 
-from selenium import webdriver
+import selenium.common.exceptions
 from selenium.webdriver.firefox.options import Options
-
-
-@contextmanager
-def suppress_stdout():
-    with open(os.devnull, "w") as devnull:
-        old_stdout = sys.stdout
-        sys.stdout = devnull
-        try:
-            yield
-        finally:
-            sys.stdout = old_stdout
+from selenium import webdriver
 
 
 def sprint(*a, **b):
@@ -47,6 +31,17 @@ class FunctionsDataBase:
         self.tmp_db.DB_INFO = Settings.TMP_DB_INFO
 
 
+class Comment:
+    def __init__(self):
+        self.item_id = 0
+        self.author = None
+        self.content = None
+        self.nd_date = 0
+        self.s_date = 0
+        self.not_date = None
+        self.human_date = None
+
+
 class Instruction:
     def __init__(self):
         self.resource_id = None
@@ -60,20 +55,18 @@ class Instruction:
         self.date_xpath = None
         self.date_format = None
         self.is_custom_get_date = None
+        self.comments: list[Comment] = []
 
 
 class CommentsInstructions(FunctionsDataBase):
     def __init__(self):
         super().__init__()
 
-        self.query = """
-                        SELECT * FROM comments_instructions
-                        WHERE id = 35
-                     """
+        self.query = Settings.QUERY_FOR_GET_INSTRUCTIONS
 
     def get(self) -> list:
         instructions_elements = self.tmp_db.query_get(self.query)
-        instructions: list = []
+        instructions: list[Instruction] = []
 
         for el in instructions_elements:
             instruction = Instruction()
@@ -91,10 +84,12 @@ class CommentsInstructions(FunctionsDataBase):
             instruction.is_custom_get_date = el['get_date_custom']
 
             if instruction.page_load_type == 'facebook_plugin':
-                instruction.blocks_xpath = 'div:::direction:::right'
+                instruction.general_block_xpath = 'div:::class:::_4k-6'
+                instruction.blocks_xpath = 'div:::direction:::left'
                 instruction.content_xpath = '1::del::div:::class:::_3-8m'
                 instruction.date_xpath = '2::del::data-utime=":::"'
-                instruction.author_xpath = '3::del:://span[1]/text()'
+                instruction.author_xpath = '1::del::(a:::class:::UFICommentActorName)::' \
+                                           '$or::(span:::class:::UFICommentActorName)'
 
             if instruction.encoding == '':
                 instruction.encoding = 'utf8'
@@ -317,24 +312,26 @@ class CommentsParseFunctions(FunctionsDataBase):
         return link
 
     @staticmethod
-    async def get_web_page(link: str, encoding: str) -> str:
+    async def get_web_page(link: str, encoding: str) -> BeautifulSoup:
+        page_str: str = ''
+
         async with aiohttp.ClientSession(headers=Settings.HEADERS) as session:
             try:
                 async with session.get(link, timeout=Settings.TIMEOUT) as resp:
                     file = await resp.read()
                     if resp.status == 200:
-                        return file.decode(encoding=encoding, errors='replace')
+                        page_str = file.decode(encoding=encoding, errors='replace')
 
             except aiohttp.client.ClientConnectorCertificateError:
                 async with session.get(link, timeout=Settings.TIMEOUT, ssl=False) as resp:
                     file = await resp.read()
                     if resp.status == 200:
-                        return file.decode(encoding=encoding, errors='replace')
-                return ''
-        return ''
+                        page_str = file.decode(encoding=encoding, errors='replace')
+
+        return BeautifulSoup(page_str, "html.parser")
 
     @staticmethod
-    def get_web_page_by_selenium(url: str) -> str:
+    def get_web_page_selenium(link: str) -> BeautifulSoup:
         options = Options()
         options.add_argument('-headless')
 
@@ -342,32 +339,29 @@ class CommentsParseFunctions(FunctionsDataBase):
         driver.set_page_load_timeout(Settings.TIMEOUT_SELENIUM)
 
         try:
-            driver.get(url)
+            driver.get(link)
             try:
                 driver.execute_script("window.scrollBy({top: document.body.scrollHeight, behavior: 'smooth'});")
-                time.sleep(5)
+                sleep(5)
             except selenium.common.exceptions.JavascriptException as e:
                 sprint('[JS ERROR] ' + str(e))
         except selenium.common.exceptions.TimeoutException:
             try:
                 driver.execute_script("window.scrollBy({top: document.body.scrollHeight, behavior: 'smooth'});")
-                time.sleep(5)
+                sleep(5)
             except selenium.common.exceptions.JavascriptException as e:
                 sprint('[JS ERROR] ' + str(e))
             driver.execute_script("window.stop();")
         except Exception as e:
             sprint('[ERROR] ' + str(e))
+        finally:
+            page_str = driver.page_source
             driver.quit()
-            return ''
 
-        page = driver.page_source
-        driver.quit()
+            if page_str == '<html><head></head><body></body></html>':
+                page_str = ''
 
-        return page
-
-    @staticmethod
-    def get_item_soup(item_page: str) -> BeautifulSoup:
-        return BeautifulSoup(item_page, "html.parser")
+            return BeautifulSoup(page_str, 'html.parser')
 
     @staticmethod
     def get_general_comment_block(soup_object: bs4.element, general_block_xpath: str) -> bs4.element:
@@ -385,20 +379,22 @@ class CommentsParseFunctions(FunctionsDataBase):
 
     @staticmethod
     def get_comment_blocks(soup_object: bs4.element, blocks_xpath: str) -> bs4.element:
-        blocks_xpath_split = blocks_xpath.split(':::')
-        tag = blocks_xpath_split[0]
-        attribute = blocks_xpath_split[1]
-        values = blocks_xpath_split[2].split('::$or::')
+        conditions = blocks_xpath.split('::$or::')
         elements = []
 
-        for value in values:
+        for condition in conditions:
+            condition = condition.replace('(', '').replace(')', '')
+            condition_split = condition.split(':::')
+            tag = condition_split[0]
+            attribute = condition_split[1]
+            value = condition_split[2]
+
             if value in ['true', 'false']:
                 elements += soup_object.find_all(tag)
             else:
                 elements += soup_object.find_all(tag, {attribute: value})
 
-        #чистка блоков от вложенных комментов
-        for value in values:
+            # чистка блоков от вложенных комментариев
             for el in elements:
                 nested_comments = el.find_all(tag, {attribute: value})
 
@@ -408,22 +404,12 @@ class CommentsParseFunctions(FunctionsDataBase):
 
         return elements
 
-    @staticmethod
-    def get_comment_fb_author(bsoup: bs4.element) -> str:
-        element = bsoup.find('a', {'class': 'UFICommentActorName'})
-
-        if element is not None:
-            return element.text
-        else:
-            element = bsoup.find('span')
-            if element is not None:
-                return element.text
-            else:
-                return ''
-
-    def check_comment(self, item_id: int, title: str, content: str) -> bool:
-        sql_query = f'select id from comments_items where item_id = %s and author = %s and content = %s'
-        _params = (item_id, title, content)
+    def check_comment(self, comment: Comment) -> bool:
+        sql_query = """
+                       SELECT id FROM comments_items 
+                       WHERE item_id = %s AND author = %s AND content = %s
+                    """
+        _params = (comment.item_id, comment.author, comment.content)
 
         result = self.tmp_db.query_get(sql_query, _params)
 
@@ -434,184 +420,139 @@ class CommentsParseFunctions(FunctionsDataBase):
 
     @staticmethod
     def escape_data(string: str) -> str:
-        emoj = re.compile("["        
+        emoj = re.compile("["
                           u"\U0001F600-\U0001F64F"  # emoticons        
                           u"\U0001F300-\U0001F5FF"  # symbols & pictographs        
                           u"\U0001F680-\U0001F6FF"  # transport & map symbols        
                           u"\U0001F1E0-\U0001F1FF"  # flags (iOS)        
                           u"\U00002500-\U00002BEF"  # chinese char        
-                          u"\U00002702-\U000027B0"        
-                          u"\U00002702-\U000027B0"        
-                          u"\U000024C2-\U0001F251"        
-                          u"\U0001f926-\U0001f937"        
-                          u"\U00010000-\U0010ffff"        
-                          u"\u2640-\u2642"        
-                          u"\u2600-\u2B55"        
-                          u"\u200d"        
-                          u"\u23cf"        
-                          u"\u23e9"       
-                          u"\u231a"        
+                          u"\U00002702-\U000027B0"
+                          u"\U00002702-\U000027B0"
+                          u"\U000024C2-\U0001F251"
+                          u"\U0001f926-\U0001f937"
+                          u"\U00010000-\U0010ffff"
+                          u"\u2640-\u2642"
+                          u"\u2600-\u2B55"
+                          u"\u200d"
+                          u"\u23cf"
+                          u"\u23e9"
+                          u"\u231a"
                           u"\ufe0f"  # dingbats        
-                          u"\u3030"                      
+                          u"\u3030"
                           "]+", re.UNICODE)
 
         s = re.sub(emoj, '', string)
+
         return escape_string(s)
 
-    def insert_comment(self, query: str, params: tuple = ()):
-        self.tmp_db.query_send(query, params)
+    # добавляет пачку комментариев в базу
+    def insert_comments(self, comments: list[Comment]):
+        query = """
+                   INSERT IGNORE INTO comments_items (item_id, author, content, nd_date, s_date, not_date) 
+                   VALUES (%s, %s, %s, %s, UNIX_TIMESTAMP(), %s)
+                """
+        params: list[tuple] = []
+
+        for comment in comments:
+            param = (comment.item_id, comment.author, comment.content, comment.nd_date, comment.not_date)
+            params.append(param)
+
+        self.tmp_db.query_send_stack(query, params)
 
     @staticmethod
-    def get_comment_data(bsoup: bs4.element, content_xpath: str) -> str:
-        parse_method = content_xpath.split('::del::')[0]
-        xpath_info = content_xpath.split('::del::')[1]
+    def get_comment_data(soup_object: bs4.element, xpath: str) -> str:
+        parse_method = xpath.split('::del::')[0]
+        xpath_info = xpath.split('::del::')[1]
 
         if parse_method == '1':
-            content_xpath = xpath_info.split(':::')
-            tag = content_xpath[0]
-            attribute = content_xpath[1]
-            values = content_xpath[2].split('::$or::')
-            element = None
+            conditions = xpath_info.split('::$or::')
 
-            for value in values:
-                element = bsoup.find(tag, {attribute: value})
+            for condition in conditions:
+                condition = condition.replace('(', '').replace(')', '')
+                condition_split = condition.split(':::')
+                tag = condition_split[0]
+                attribute = condition_split[1]
+                value = condition_split[2]
+
+                if value in ['true', 'false']:
+                    element = soup_object.find(tag)
+                else:
+                    element = soup_object.find(tag, {attribute: value})
+
                 if element:
-                    break
-
-            if element is None:
-                return ''
-
-            content = element.text.strip()
-
-            return content
+                    data = element.text.strip()
+                    return data
 
         if parse_method == '2':
-            xpath_info = xpath_info.split(':::')
-            top_tag = xpath_info[0]
-            bottom_tag = xpath_info[1]
-            bsoup = str(bsoup)
-            top_tag_position = bsoup.find(top_tag)
+            condition_split = xpath_info.split(':::')
 
-            if top_tag_position != -1:
-                element = bsoup[top_tag_position:]
-                bottom_tag_position = element.find(bottom_tag)
+            begin = condition_split[0]
+            end = condition_split[1]
 
-                if bottom_tag_position != -1:
-                    content = element[:bottom_tag_position]
+            soup_object_str = str(soup_object)
+            begin_position = soup_object_str.find(begin)
 
+            if begin_position != -1:
+                element = soup_object_str[begin_position + len(begin):]
+                end_position = element.find(end)
+
+                if end_position != -1:
+                    content = element[:end_position]
                     return content
 
-        if parse_method == '3':
-            tree = html.fromstring(str(bsoup))
-            content = tree.xpath(xpath_info[0])[0]
+        elif parse_method == '3':
+            condition_split = xpath_info.split(':::')
+            tag = condition_split[0]
+            attribute = condition_split[1]
+            value = condition_split[2]
+            return_attribute = condition_split[3]
 
-            return content
+            if attribute == 'false':
+                element = soup_object.find(tag)
+            else:
+                element = soup_object.find(tag, {attribute: value})
+
+            if element:
+                date_str = str(element[return_attribute]).strip()
+                return date_str
 
         return ''
 
-    def get_comment_pubdate(self, bsoup: bs4.element, date_xpath: str, date_format: str) -> dict:
+    def str_to_date(self, date_str: str, date_format: str) -> dict:
         date_info = {
             'not_date': '',
             'nd_date': 0,
             'human_date': ''
         }
 
-        if date_xpath == '':
-            pubdate = datetime.now()
-            not_date = f'{pubdate.year}-{pubdate.month}-{pubdate.day}'
-            human_date = f'{pubdate.year}-{pubdate.month}-{pubdate.day} ' \
-                         f'{pubdate.hour}:{pubdate.minute}:{pubdate.second}'
-
-            nd_date = int(mktime(utc.localize(pubdate).utctimetuple()))
-
-            date_info['not_date'] = not_date
-            date_info['nd_date'] = nd_date
-            date_info['human_date'] = human_date
-
-            return date_info
-
-        xpath_info = date_xpath.split('::del::')
-        parse_method = xpath_info[0]
-        xpath_info = xpath_info[1:]
-
-        if parse_method == '1':
-            date_xpath = xpath_info[0].split(':::')
-            element = bsoup.find(date_xpath[0], {date_xpath[1]: date_xpath[2]})
-
-        elif parse_method == '2':
-            element = None
-            xpath_info = xpath_info[0].split(':::')
-            top_tag = xpath_info[0]
-            bottom_tag = xpath_info[1]
-            bsoup = str(bsoup)
-            top_tag_position = bsoup.find(top_tag)
-
-            if top_tag_position != -1:
-                top_tag_position += len(top_tag)
-                element = bsoup[top_tag_position:]
-                bottom_tag_position = element.find(bottom_tag)
-
-                if bottom_tag_position != -1:
-                    element = element[:bottom_tag_position]
-                    element = self.get_item_soup(element)
-                else:
-                    element = None
-
-        elif parse_method == '3':
-            date_xpath = xpath_info[0].split(':::')
-
-            if date_xpath[1] == 'false':
-                element = bsoup.find(date_xpath[0])
-            else:
-                element = bsoup.find(date_xpath[0], {date_xpath[1]: date_xpath[2]})
-
-            element = element[date_xpath[3]]
-            element = self.get_item_soup(element)
-
-        else:
-            return {}
-
-        if element is None:
-            return date_info
-
-        pubdate = element.text.strip()
-        pubdate = self.date_replacer(pubdate)
-
-        if date_format != '':
-            pubdate = dateparser.parse(pubdate, settings={'DATE_ORDER': date_format})
-        else:
-            pubdate = dateparser.parse(pubdate)
-
-        if pubdate is None:
-            return date_info
-
-        pubdate_str = f'{pubdate.year}-{pubdate.month}-{pubdate.day} {pubdate.hour}:{pubdate.minute}:{pubdate.second}'
-
-        test_pubdate = dateparser.parse(pubdate_str)
+        date_str = self.date_replacer(date_str)
         current_date = datetime.now()
 
-        if test_pubdate > current_date:
+        if date_format != '':
+            date = dateparser.parse(date_str, settings={'DATE_ORDER': date_format})
+        else:
+            date = dateparser.parse(date_str)
+
+        if date is None:
             return date_info
 
-        current_time = datetime.now()
+        if date.timestamp() > current_date.timestamp():
+            return date_info
 
-        if pubdate is None:
-            pubdate = datetime.now()
-
-        hour = pubdate.hour
-        minute = pubdate.minute
-        second = pubdate.second
+        hour = date.hour
+        minute = date.minute
+        second = date.second
 
         if hour == 0 and minute == 0:
-            hour = current_time.hour
-            minute = current_time.minute
-            second = current_time.second
+            hour = current_date.hour
+            minute = current_date.minute
+            second = current_date.second
 
-        not_date = f'{pubdate.year}-{pubdate.month}-{pubdate.day}'
-        human_date = f'{pubdate.year}-{pubdate.month}-{pubdate.day} {hour}:{minute}:{second}'
+        not_date = f'{date.year}-{date.month}-{date.day}'
+        human_date = f'{date.year}-{date.month}-{date.day} {hour}:{minute}:{second}'
 
-        pubdate = dateparser.parse(human_date)
-        nd_date = int(mktime(utc.localize(pubdate).utctimetuple()))
+        nd_date = int(date.timestamp())
+
         date_info['not_date'] = not_date
         date_info['nd_date'] = nd_date
         date_info['human_date'] = human_date
@@ -620,47 +561,11 @@ class CommentsParseFunctions(FunctionsDataBase):
 
     @staticmethod
     def date_replacer(date_str: str) -> str:
-        replace_word_1 = {'понедельник': 'monday',
-                          'вторник': 'tuesday',
-                          'среда': 'wednesday',
-                          'четверг': 'thursday',
-                          'пятница': 'friday',
-                          'суббота': 'saturday',
-                          'воскресенье': 'sunday',
-
-                          'января': 'january',
-                          'февраля': 'february',
-                          'марта': 'march',
-                          'апреля': 'april',
-                          'мая': 'may',
-                          'июня': 'june',
-                          'июля': 'july',
-                          'августа': 'august',
-                          'сентября': 'september',
-                          'октября': 'october',
-                          'ноября': 'november',
-                          'декабря': 'december',
-
-                          'қаңтар': 'jan',
-                          'ақпан': 'feb',
-                          'наурыз': 'mar',
-                          'сәуір': 'apr',
-                          'мамыр': 'may',
-                          'маусым': 'jun',
-                          'шілде': 'jul',
-                          'тамыз': 'aug',
-                          'қыркүйек': 'sept',
-                          'қазан': 'oct',
-                          'қараша': 'nov',
-                          'желтоқсан': 'dec',
-
-                          'ж.': 'year',
-                          'г.': 'year'
-                          }
+        replace_words = Settings.REPLACE_WORDS_FOR_DATE
 
         date_str = date_str.lower()
 
-        for key, value in replace_word_1.items():
+        for key, value in replace_words.items():
             date_str = date_str.replace(key, value)
 
         return date_str
@@ -668,7 +573,7 @@ class CommentsParseFunctions(FunctionsDataBase):
     # CUSTOM FUNCTIONS
 
     @staticmethod
-    def get_web_page_117002(data: dict) -> str:
+    def get_web_page_117002(data: dict) -> BeautifulSoup:
         item_id = data['link'].split('-')[-1]
 
         if item_id[-1] == '/':
@@ -677,18 +582,18 @@ class CommentsParseFunctions(FunctionsDataBase):
         try:
             result = requests.get(url='http://vesti.kz/news/get/comments/?id=' + item_id,
                                   timeout=Settings.TIMEOUT,
-                                  headers=Settings.HEADERS,)
+                                  headers=Settings.HEADERS, )
 
-            return result.text
+            return BeautifulSoup(result.text, "html.parser")
         except Exception as e:
             sprint('[ERROR] ' + str(e))
-            return ''
+            return BeautifulSoup('', "html.parser")
 
     @staticmethod
-    def get_comment_date_124444(bsoup: bs4.element.Tag, date_format):
+    def get_comment_date_124444(soup_object: bs4.element.Tag, date_format):
         date_info = {}
         try:
-            date_in_span = bsoup.find_all('span')[2]
+            date_in_span = soup_object.find_all('span')[2]
             a_in_span = date_in_span.find('a')
             span_in_span = date_in_span.find('span')
             a_in_span.decompose()

@@ -1,18 +1,20 @@
+import warnings
 import asyncio
 import bs4
 
+from pytz_deprecation_shim import PytzUsageWarning
 from urllib3 import disable_warnings
-from time import time
 from threading import Thread
 from queue import Queue
+from time import time
 
 from functions.settings import Settings
 from functions.parse_functions import sprint
-from functions.parse_functions import Instruction, CommentsInstructions, NewsItem
+from functions.parse_functions import Comment, Instruction, CommentsInstructions, NewsItem
 from functions.parse_functions import MainLogInfo, ResourceLogInfo, Logger
 from functions.parse_functions import CommentsParseFunctions
 
-
+warnings.filterwarnings(action="ignore", category=PytzUsageWarning)
 disable_warnings()
 
 
@@ -38,13 +40,12 @@ class CommentsParser:
         self.main_log_info: MainLogInfo = self.log.main_create()
         self.resource_log_info: ResourceLogInfo = ResourceLogInfo()
 
-        self.msg = ''
-
         self.custom_functions = {
             'get_web_page_117002': self.func.get_web_page_117002,
             'get_comment_date_124444': self.func.get_comment_date_124444,
         }
 
+    # запуск парсера
     def run(self):
         try:
             instructions = CommentsInstructions().get()
@@ -57,12 +58,24 @@ class CommentsParser:
                 self.resource_log_info.resource_id = instruction.resource_id
                 self.resource_log_info.links_count = len(news_items)
 
+                # асинхронная загрузка страниц
                 if instruction.page_load_type == 'selenium' or instruction.page_load_type == 'facebook_plugin':
-                    self.get_soup_obj_selenium(news_items, instruction)
+                    self.start_threads_selenium(news_items, instruction)
+                else:
+                    futures = [self.set_soup_obj(item, instruction) for item in news_items]
+                    loop = asyncio.get_event_loop()
+                    loop.run_until_complete(asyncio.wait(futures))
 
-                futures = [self.parse_item(instruction, item) for item in news_items]
-                loop = asyncio.get_event_loop()
-                loop.run_until_complete(asyncio.wait(futures))
+                for item in news_items:
+                    self.parse_item(item, instruction)
+
+                good_comments_count = len(instruction.comments)
+
+                if good_comments_count > 0:
+                    self.func.insert_comments(instruction.comments)
+
+                self.main_log_info.added_comments_count += good_comments_count
+                self.resource_log_info.added_comments_count += good_comments_count
 
                 self.log.resource_close(self.resource_log_info)
 
@@ -76,29 +89,10 @@ class CommentsParser:
             self.log.resource_close(self.resource_log_info)
             exit(0)
 
-    async def parse_item(self, instruction: Instruction, item: NewsItem):
-        msg = f'\n***********************************************************************\n\n'
-        msg += f'[RESOURCE ID: {instruction.resource_id}] {item.link}\n'
+    # устанавливает объектам items их параметр page_soup_obj (страница или часть страницы со всеми комментариями)
+    async def set_soup_obj(self, item: NewsItem, instruction: Instruction):
+        link = item.link
 
-        if item.page_soup_obj is None:
-            item.page_soup_obj = await self.get_soup_obj(item.link, instruction)
-
-        comment_blocks = self.func.get_comment_blocks(item.page_soup_obj, instruction.blocks_xpath)
-        comments_count = len(comment_blocks)
-
-        self.main_log_info.comments_count += comments_count
-        self.resource_log_info.comments_count += comments_count
-
-        msg += f'[COMMENTS COUNT] {str(comments_count)}\n\n'
-
-        for comment_block in comment_blocks:
-            msg += f'---------------------------------------------------\n'
-            comment_data = await self.parse_comment_block(comment_block, instruction)
-            msg = await self.insert_comment(item.item_id, comment_data, msg)
-
-        sprint(msg)
-
-    async def get_soup_obj(self, link: str, instruction: Instruction) -> bs4.element:
         if instruction.template_link != '':
             link = self.func.get_item_link(instruction.template_link, link)
 
@@ -108,12 +102,11 @@ class CommentsParser:
                 'encoding': instruction.encoding
             }
             custom_function_name = 'get_web_page_' + str(instruction.resource_id)
-            page = self.custom_functions[custom_function_name](data)
+            soup_page = self.custom_functions[custom_function_name](data)
 
         else:
-            page = await self.func.get_web_page(link, instruction.encoding)
+            soup_page = await self.func.get_web_page(link, instruction.encoding)
 
-        soup_page = self.func.get_item_soup(page)
         general_soup_object = soup_page
 
         if instruction.general_block_xpath != '':
@@ -122,9 +115,10 @@ class CommentsParser:
                 general_block_xpath=instruction.general_block_xpath
             )
 
-        return general_soup_object
+        item.page_soup_obj = general_soup_object
 
-    def get_soup_obj_selenium(self, news_items: list[NewsItem], instruction: Instruction):
+    # запускает загрузку страниц через selenium в потоках
+    def start_threads_selenium(self, news_items: list[NewsItem], instruction: Instruction):
         max_threads = Settings.SELENIUM_MAX_THREADS
         tasks_count = len(news_items)
 
@@ -145,24 +139,23 @@ class CommentsParser:
                 items_q,
                 tasks_count
             )
-            thread = Thread(target=self.get_soup_obj_selenium_thread, args=args)
+            thread = Thread(target=self.set_soup_obj_selenium_thread, args=args)
             thread.start()
             threads.append(thread)
 
         for thread in threads:
             thread.join()
 
-    def get_soup_obj_selenium_thread(self, instruction: Instruction, items_q: MyQueue, tasks_count: int):
+    # тело потока. так же устанавливает объектам items их параметр page_soup_obj
+    def set_soup_obj_selenium_thread(self, instruction: Instruction, items_q: MyQueue, tasks_count: int):
         while not items_q.empty():
             item = items_q.get()
-            link = item.link
 
             if instruction.page_load_type == 'facebook_plugin':
-                link = self.func.get_facebook_item_link(item.link)
+                item.link = self.func.get_facebook_item_link(item.link)
 
-            page = self.func.get_web_page_by_selenium(link)
+            soup_page = self.func.get_web_page_selenium(item.link)
 
-            soup_page = self.func.get_item_soup(page)
             general_soup_object = soup_page
 
             if instruction.general_block_xpath != '':
@@ -175,64 +168,72 @@ class CommentsParser:
             items_q.task_done()
             sprint(f'\r[SELENIUM] Uploaded successfully: {items_q.get_task_count()}/{tasks_count}', end='')
 
-    async def parse_comment_block(self, comment_block: bs4.element, instruction: Instruction) -> dict:
-        comment_data = {
-            'author': '',
-            'date': '',
-            'content': ''
-        }
+    # выполняет инструкцию для одной ссылки. формирует список объектов комментариев, которые будут добавлены
+    def parse_item(self, item: NewsItem, instruction: Instruction):
+        sprint(f'\n***********************************************************************\n')
+        sprint(f'[RESOURCE ID: {instruction.resource_id}] {item.link}')
 
-        if instruction.page_load_type == 'facebook_plugin':
-            author = self.func.get_comment_fb_author(comment_block)
-        else:
-            author = self.func.get_comment_data(comment_block, instruction.author_xpath)
+        comment_blocks = self.func.get_comment_blocks(item.page_soup_obj, instruction.blocks_xpath)
+        comments_count = len(comment_blocks)
+
+        self.main_log_info.comments_count += comments_count
+        self.resource_log_info.comments_count += comments_count
+
+        sprint(f'[COMMENTS COUNT] {str(comments_count)}\n')
+
+        for comment_block in comment_blocks:
+            sprint(f'---------------------------------------------------')
+            comment: Comment = self.parse_comment_block(comment_block, instruction)
+            comment.item_id = item.item_id
+            sprint(f'[AUTHOR] {comment.author}')
+            sprint(f'[DATE] {comment.human_date}')
+            sprint(f'[CONTENT] {comment.content}')
+
+            if self.check_comment(comment):
+                instruction.comments.append(comment)
+
+    # разбирает блок комментария. возвращает объект одного комментария
+    def parse_comment_block(self, comment_block: bs4.element, instruction: Instruction) -> Comment:
+        comment: Comment = Comment()
+
+        author = self.func.get_comment_data(comment_block, instruction.author_xpath)
 
         if instruction.is_custom_get_date:
             custom_function_name = 'get_comment_date_' + str(instruction.resource_id)
             date = self.custom_functions[custom_function_name](comment_block, instruction.date_format)
         else:
-            date = self.func.get_comment_pubdate(comment_block, instruction.date_xpath, instruction.date_format)
+            date_str = self.func.get_comment_data(comment_block, instruction.date_xpath)
+            date = self.func.str_to_date(date_str, instruction.date_format)
 
         content = self.func.get_comment_data(comment_block, instruction.content_xpath)
 
-        comment_data['author'] = author
-        comment_data['date'] = date
-        comment_data['content'] = content
+        comment.author = self.func.escape_data(author)
+        comment.content = self.func.escape_data(content)
+        comment.nd_date = date['nd_date']
+        comment.not_date = date['not_date']
+        comment.human_date = date['human_date']
 
-        return comment_data
+        return comment
 
-    async def insert_comment(self, item_id: int, comment_data: dict, msg: str) -> str:
-        author = str(comment_data['author'])
-        date = comment_data['date']
-        content = str(comment_data['content'])
-
-        if author == '' or content == '' or date['nd_date'] == 0:
-            msg += f'\n!!! [BAD COMMENT]\n'
+    # валидация комментария
+    def check_comment(self, comment: Comment) -> bool:
+        if comment.author == '' or comment.content == '' or comment.nd_date == 0:
             self.main_log_info.bad_comments_count += 1
             self.resource_log_info.bad_comments_count += 1
+            sprint()
+            sprint(f'!!! [BAD COMMENT]')
 
-            return msg
+            return False
 
-        title = self.func.escape_data(author)
-        content = self.func.escape_data(content)
-        is_comment_in_db = self.func.check_comment(item_id, title, content)
+        is_comment_in_db = self.func.check_comment(comment)
 
-        msg += f"[AUTHOR] {author}\n[DATE] {date['human_date']}\n[CONTENT] {content}\n"
+        if is_comment_in_db:
+            return False
 
-        query = """
-                   INSERT IGNORE INTO comments_items (item_id, author, content, nd_date, s_date, not_date) 
-                   VALUES (%s, %s, %s, %s, UNIX_TIMESTAMP(), %s)
-                """
+        sprint()
+        sprint(f'[WILL BE ADDED]')
 
-        params = (item_id, title, content, date['nd_date'], date['not_date'])
-
-        if not is_comment_in_db:
-            self.func.insert_comment(query, params)
-            self.main_log_info.added_comments_count += 1
-            self.resource_log_info.added_comments_count += 1
-            msg += '[ADDED]\n'
-
-        return msg
+        return True
 
 
 if __name__ == "__main__":
