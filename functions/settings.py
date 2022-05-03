@@ -26,7 +26,7 @@ class Settings:
 
     QUERY_FOR_GET_INSTRUCTIONS = """
                                     SELECT * FROM comments_instructions
-                                    WHERE id = 7
+                                    WHERE ID = 12
                                  """
 
     REPLACE_WORDS_FOR_DATE = {'понедельник': 'monday',

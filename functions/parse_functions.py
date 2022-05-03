@@ -474,7 +474,7 @@ class CommentsParseFunctions(FunctionsDataBase):
                 attribute = condition_split[1]
                 value = condition_split[2]
 
-                if value in ['true', 'false']:
+                if value in ['$true', '$false']:
                     element = soup_object.find(tag)
                 else:
                     element = soup_object.find(tag, {attribute: value})
@@ -497,8 +497,10 @@ class CommentsParseFunctions(FunctionsDataBase):
                 end_position = element.find(end)
 
                 if end_position != -1:
-                    content = element[:end_position]
-                    return content
+                    el_str = element[:end_position]
+                    el = BeautifulSoup(el_str)
+                    data = el.text
+                    return data
 
         elif parse_method == '3':
             condition_split = xpath_info.split(':::')
@@ -507,7 +509,7 @@ class CommentsParseFunctions(FunctionsDataBase):
             value = condition_split[2]
             return_attribute = condition_split[3]
 
-            if attribute == 'false':
+            if attribute == '$false':
                 element = soup_object.find(tag)
             else:
                 element = soup_object.find(tag, {attribute: value})
