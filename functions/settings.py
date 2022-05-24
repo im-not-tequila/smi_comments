@@ -25,8 +25,7 @@ class Settings:
     TMP_DB_INFO = json.loads(config['CONNECTIONS_INFO']['TMP_DB'])
 
     QUERY_FOR_GET_INSTRUCTIONS = """
-                                    SELECT * FROM comments_instructions
-                                    WHERE ID = 12
+                                    SELECT * FROM comments_instructions WHERE page_load_type = ''
                                  """
 
     REPLACE_WORDS_FOR_DATE = {'понедельник': 'monday',

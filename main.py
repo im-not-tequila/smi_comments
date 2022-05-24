@@ -79,6 +79,8 @@ class CommentsParser:
 
                 self.log.resource_close(self.resource_log_info)
 
+            sprint(f'\n***********************************************************************\n')
+            sprint(f'Total comments: {self.main_log_info.comments_count}')
             self.log.main_close(self.main_log_info)
 
         except Exception as e:
@@ -246,4 +248,4 @@ if __name__ == "__main__":
     comments_parser.run()
     time_finish = time()
     sprint()
-    sprint(f'Total working time: {time_finish - time_start}')
+    sprint(f'Total working time: {time_finish - time_start} seconds.')
