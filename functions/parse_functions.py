@@ -266,7 +266,7 @@ class CommentsParseFunctions(FunctionsDataBase):
 
         for connection in base_connections:
             from_ip = connection['Host'].split(':')
-            if connection['User'] == 'comments_parser' and from_ip[0] == '94.247.130.37':
+            if connection['User'] == 'comments_parser' and from_ip[0] == '':
                 connections += 1
 
         if connections > 1:
